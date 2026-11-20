@@ -64,10 +64,12 @@ const TARGET_MODEL_FILE = 'assets/models/shooting-range-target.glb';
 // The shooting-range-target.glb figure is 1.8 m tall and stands on a wooden stand.
 // The chest/head "bust" (the part with the scoring rings) spans y = 0.62 .. 1.80 m, which is
 // 1.18 m tall - exactly the old board height. The game's "board centre" is the bust centre.
-export const TARGET_BOARD_WIDTH = 0.79;
-export const TARGET_BOARD_HEIGHT = 1.18;
-const TARGET_MODEL_OFFSET_Y = -1.2; // moves the bust centre to local y = 0
-const TARGET_MODEL_OFFSET_Z = 0.011; // puts the front face at ~ +0.02 like the old board
+// The target is scaled up so the scoring bust is about the size of a standing person (~1.8 m).
+const TARGET_SCALE = 1.5;
+export const TARGET_BOARD_WIDTH = 0.79 * TARGET_SCALE;
+export const TARGET_BOARD_HEIGHT = 1.18 * TARGET_SCALE;
+const TARGET_MODEL_OFFSET_Y = -1.2 * TARGET_SCALE; // moves the bust centre to local y = 0
+const TARGET_MODEL_OFFSET_Z = 0.011 * TARGET_SCALE; // puts the front face just ahead of the board origin
 
 // Samurai Edge GLB: muzzle points toward -X, grip toward +X, up = +Y, ~0.229 m long, centred.
 // Game rig convention: barrel points along +Z (Object3D.lookAt aims +Z at the aim point).
@@ -329,6 +331,7 @@ export function createHangingTargetModel(
 
   // 3. The shooting-range target model (bust centred on the board origin)
   const model = targetScene.clone(true);
+  model.scale.setScalar(TARGET_SCALE);
   model.position.set(0, TARGET_MODEL_OFFSET_Y, TARGET_MODEL_OFFSET_Z);
   boardGroup.add(model);
 

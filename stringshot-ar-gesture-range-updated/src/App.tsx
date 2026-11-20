@@ -49,6 +49,9 @@ const INITIAL_HUD: HudSnapshot = {
     aimScreenY: 0.5,
     handRoll: 0,
     handScale: 0.2,
+    handUpX: 0,
+    handUpY: 1,
+    handUpZ: 0,
     stability: 0.85,
     recoilEnergy: 0,
     recoilTriggered: false,
@@ -308,7 +311,9 @@ export default function App() {
                   ? 'Hand Gun Active'
                   : simModeEnabled
                     ? 'Desktop Aim Ready'
-                    : 'Form Gun Gesture'}
+                    : hud.gesture.handDetected
+                      ? 'Point index, curl others'
+                      : 'Show hand (30-40 cm)'}
               </span>
               <span className="font-mono-num text-slate-400">
                 {hud.aimInfo.hasTargetLock

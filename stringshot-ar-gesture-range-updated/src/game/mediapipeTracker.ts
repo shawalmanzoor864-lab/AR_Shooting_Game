@@ -109,9 +109,9 @@ export class MediaPipeGestureTracker {
         baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate },
         runningMode: 'VIDEO' as const,
         numHands: 1,
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
+        minHandDetectionConfidence: 0.4,
+        minHandPresenceConfidence: 0.4,
+        minTrackingConfidence: 0.4,
       });
 
       try {
@@ -259,9 +259,9 @@ export class MediaPipeGestureTracker {
       const ringR = ratio(16, 13);
       const pinkyR = ratio(20, 17);
       const curled =
-        (midR < 1.4 ? 1 : 0) + (ringR < 1.4 ? 1 : 0) + (pinkyR < 1.4 ? 1 : 0);
-      const indexExtended = indexR > 1.5;
-      const indexLeads = indexR > Math.max(midR, ringR, pinkyR) + 0.3;
+        (midR < 1.55 ? 1 : 0) + (ringR < 1.55 ? 1 : 0) + (pinkyR < 1.55 ? 1 : 0);
+      const indexExtended = indexR > 1.3;
+      const indexLeads = indexR > Math.max(midR, ringR, pinkyR) + 0.12;
       rawGun = indexExtended && curled >= 2 && indexLeads;
     } else {
       const idxLen = dist2(p8, p5) / palmPx;
@@ -283,7 +283,7 @@ export class MediaPipeGestureTracker {
       this.gunPoseStreak = 0;
       this.gunLostStreak++;
       this.stableFrames = 0;
-      if (this.gunLostStreak > 6) this.gunLocked = false;
+      if (this.gunLostStreak > 9) this.gunLocked = false;
     }
 
     // ---- Where the gun grip sits: the centre of the palm ----

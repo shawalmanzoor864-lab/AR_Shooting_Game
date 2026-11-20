@@ -750,7 +750,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
       // Update camera spatial orientation & position
       spatialTracker.update(camera, delta);
       const cameraPitch = spatialTracker.getCameraPitch(camera);
-      const isLookingAtFeet = cameraPitch < -0.45; // Looking downward ~26°+ toward floor/feet
+      const isLookingAtFeet = cameraPitch < -0.95; // Looking steeply down (~55°+) at the floor/feet
 
       // Sync backdrop visibility with live camera feed
       fallbackBackdrop.visible = !cameraActive;
@@ -985,7 +985,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
             aimReticle.root.visible = true;
             aimReticle.root.position.copy(hit.point).addScaledVector(_boardNormal, 0.032);
             aimReticle.root.quaternion.copy(targetObj.rig.boardGroup.quaternion);
-            aimReticle.outerRing.scale.setScalar(dispRadius);
+            aimReticle.outerRing.scale.setScalar(Math.max(dispRadius, hit.distance * 0.02)); // stays visible at long range
             aimReticle.ticksGroup.rotation.z = elapsed * 1.4;
 
             const ringHex =
