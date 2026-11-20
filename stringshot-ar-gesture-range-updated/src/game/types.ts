@@ -47,10 +47,16 @@ export interface HandGestureState {
   handRoll: number;
   /** Apparent palm length as a fraction of the screen height (used to size the 3D AR gun) */
   handScale: number;
-  /** Hand "up" direction (thumb / sights side) in camera space, used to roll the 3D gun with the hand */
+  /** Hand "up" direction (pinky -> index knuckle line, thumb side) in camera space, rolls the gun with the hand */
   handUpX: number;
   handUpY: number;
   handUpZ: number;
+  /** Hand "forward" direction (wrist -> knuckles) in camera space = the way the gun barrel points */
+  handForwardX: number;
+  handForwardY: number;
+  handForwardZ: number;
+  /** True when the hand shown on screen is a right hand (decides which side the virtual hand grips) */
+  handIsRight: boolean;
   /** 0..1 steadiness of the hand (higher = tighter aiming dispersion circle) */
   stability: number;
   /** 0..1 instantaneous upward recoil impulse energy */

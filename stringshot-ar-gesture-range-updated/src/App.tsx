@@ -52,6 +52,10 @@ const INITIAL_HUD: HudSnapshot = {
     handUpX: 0,
     handUpY: 1,
     handUpZ: 0,
+    handForwardX: 0,
+    handForwardY: 0,
+    handForwardZ: -1,
+    handIsRight: true,
     stability: 0.85,
     recoilEnergy: 0,
     recoilTriggered: false,
@@ -70,6 +74,7 @@ export default function App() {
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [levelIndex, setLevelIndex] = useState<number>(0);
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
+  const [swapHand, setSwapHand] = useState<boolean>(false);
   const [simModeEnabled, setSimModeEnabled] = useState<boolean>(
     () => !(typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches),
   );
@@ -118,6 +123,7 @@ export default function App() {
         phase={phase}
         levelIndex={levelIndex}
         simModeEnabled={simModeEnabled}
+        swapHand={swapHand}
         cameraFacing={cameraFacing}
         onHudUpdate={setHud}
         onPhaseChange={setPhase}
@@ -311,9 +317,7 @@ export default function App() {
                   ? 'Hand Gun Active'
                   : simModeEnabled
                     ? 'Desktop Aim Ready'
-                    : hud.gesture.handDetected
-                      ? 'Point index, curl others'
-                      : 'Show hand (30-40 cm)'}
+                    : 'Show your hand (30-40 cm)'}
               </span>
               <span className="font-mono-num text-slate-400">
                 {hud.aimInfo.hasTargetLock
@@ -368,6 +372,15 @@ export default function App() {
                   }`}
                 >
                   {simModeEnabled ? 'Sim Aim: On' : 'Sim Aim: Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSwapHand((v) => !v)}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                    swapHand ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  Swap Hand
                 </button>
                 <button
                   type="button"

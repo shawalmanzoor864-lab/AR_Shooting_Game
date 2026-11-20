@@ -9,6 +9,7 @@ import {
   ARGunRig,
   createAimReticle,
   createARGunModel,
+  VIRTUAL_HAND_ANCHOR,
   createGuardianBox,
   createHangingTargetModel,
   GuardianBoxRig,
@@ -74,6 +75,7 @@ interface ARGameViewportProps {
   phase: GamePhase;
   levelIndex: number;
   simModeEnabled: boolean;
+  swapHand: boolean;
   cameraFacing: 'environment' | 'user';
   onHudUpdate: (hud: HudSnapshot) => void;
   onPhaseChange: (nextPhase: GamePhase) => void;
@@ -92,11 +94,15 @@ const _boardNormal = new THREE.Vector3();
 const _shotRaycaster = new THREE.Raycaster();
 const _quatA = new THREE.Quaternion();
 const _unitZ = new THREE.Vector3(0, 0, 1);
+const _handPos = new THREE.Vector3();
+const _handFwd = new THREE.Vector3();
+const _handUp = new THREE.Vector3();
+const _basisX = new THREE.Vector3();
+const _basisM = new THREE.Matrix4();
+const _anchorLocal = new THREE.Vector3();
 
 // AR gun <-> hand fitting
 const GUN_HAND_DISTANCE = 0.5; // metres in front of the camera the gun is drawn
-const GUN_NATIVE_LENGTH = 0.229; // pistol length in the rig (metres)
-const GUN_TO_PALM_RATIO = 2.3; // a pistol is ~2.3x the length of a palm (wrist to middle knuckle)
 const GUN_GRIP_LOCAL = new THREE.Vector3(0, -0.02, -0.02); // grip centre in rig space (barrel = +Z)
 
 const BOARD_HALF_W = TARGET_BOARD_WIDTH * 0.5;
@@ -106,6 +112,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
   phase,
   levelIndex,
   simModeEnabled,
+  swapHand,
   cameraFacing,
   onHudUpdate,
   onPhaseChange,
@@ -118,6 +125,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
   const phaseRef = useRef<GamePhase>(phase);
   const levelIndexRef = useRef<number>(levelIndex);
   const simModeRef = useRef<boolean>(simModeEnabled);
+  const swapHandRef = useRef<boolean>(swapHand);
   const cameraFacingRef = useRef<'environment' | 'user'>(cameraFacing);
   const onHudUpdateRef = useRef(onHudUpdate);
   const onPhaseChangeRef = useRef(onPhaseChange);
@@ -125,6 +133,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
   phaseRef.current = phase;
   levelIndexRef.current = levelIndex;
   simModeRef.current = simModeEnabled;
+  swapHandRef.current = swapHand;
   cameraFacingRef.current = cameraFacing;
   onHudUpdateRef.current = onHudUpdate;
   onPhaseChangeRef.current = onPhaseChange;
@@ -777,6 +786,10 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
             handUpX: 0,
             handUpY: 1,
             handUpZ: 0,
+            handForwardX: 0,
+            handForwardY: 0,
+            handForwardZ: -1,
+            handIsRight: true,
             stability: 0.85,
             recoilEnergy: 0,
             recoilTriggered: false,
@@ -786,8 +799,32 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
       // Resolve effective gesture (live MediaPipe hand OR desktop sim fallback when hand not visible)
       const useSimGun = simModeRef.current && !mpState.isGunPose && simGunActive;
       const effectiveGunPose = mpState.isGunPose || (curPhase === 'playing' && useSimGun);
-      const effAimX = mpState.isGunPose ? mpState.aimScreenX : simAimX;
-      const effAimY = mpState.isGunPose ? mpState.aimScreenY : simAimY;
+      // Live hand frame in world space: palm position, barrel (forward) and up directions
+      let liveAimX = mpState.aimScreenX;
+      let liveAimY = mpState.aimScreenY;
+      if (mpState.isGunPose) {
+        camera.updateMatrixWorld();
+        _ndc.set(mpState.handScreenX * 2 - 1, -(mpState.handScreenY * 2 - 1));
+        _vec3A.set(_ndc.x, _ndc.y, 0.5).unproject(camera).sub(camera.position).normalize();
+        _handPos.copy(camera.position).addScaledVector(_vec3A, GUN_HAND_DISTANCE);
+        _handFwd
+          .set(mpState.handForwardX, mpState.handForwardY, mpState.handForwardZ)
+          .applyQuaternion(camera.quaternion)
+          .normalize();
+        _handUp
+          .set(mpState.handUpX, mpState.handUpY, mpState.handUpZ)
+          .applyQuaternion(camera.quaternion);
+        // Aim = where the barrel line lands on screen (the point 8 m along the hand's pointing direction)
+        _vec3B.copy(_handPos).addScaledVector(_handFwd, 8);
+        _vec3C.copy(_vec3B).applyMatrix4(camera.matrixWorldInverse);
+        if (_vec3C.z < -0.3) {
+          _vec3B.project(camera);
+          liveAimX = THREE.MathUtils.clamp((_vec3B.x + 1) / 2, 0.03, 0.97);
+          liveAimY = THREE.MathUtils.clamp((1 - _vec3B.y) / 2, 0.03, 0.97);
+        }
+      }
+      const effAimX = mpState.isGunPose ? liveAimX : simAimX;
+      const effAimY = mpState.isGunPose ? liveAimY : simAimY;
       const effHandX = mpState.isGunPose ? mpState.handScreenX : 0.64 + (simAimX - 0.5) * 0.25;
       const effHandY = mpState.isGunPose ? mpState.handScreenY : 0.74 + (simAimY - 0.5) * 0.18;
       const effStability = mpState.isGunPose ? mpState.stability : 0.88;
@@ -1014,45 +1051,56 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
       if (gun && gunOpacitySmooth > 0.03) {
         gun.root.visible = true;
         const liveHand = mpState.isGunPose;
+        gun.hand.visible = liveHand;
 
-        // Anchor = centre of the real palm, projected a fixed distance in front of the camera
-        _ndc.set(effHandX * 2 - 1, -(effHandY * 2 - 1));
-        _vec3A.set(_ndc.x, _ndc.y, 0.5).unproject(camera);
-        _vec3A.sub(camera.position).normalize();
-        gun.root.position.copy(camera.position).addScaledVector(_vec3A, GUN_HAND_DISTANCE);
-
-        // Aim barrel toward the actual aiming ray point far out (or hit point)
-        if (rayHitPoint) {
-          _lookTarget.copy(rayHitPoint);
-        } else {
-          _ndc.set(effAimX * 2 - 1, -(effAimY * 2 - 1));
-          _raycaster.setFromCamera(_ndc, camera);
-          _lookTarget.copy(_raycaster.ray.origin).addScaledVector(_raycaster.ray.direction, 8);
-        }
-
-        // Roll the gun exactly with the real hand (thumb / sights side = hand "up")
-        if (liveHand) {
-          _vec3B.set(mpState.handUpX, mpState.handUpY, mpState.handUpZ).applyQuaternion(camera.quaternion);
-          gun.root.up.copy(_vec3B);
-        } else {
-          gun.root.up.set(0, 1, 0);
-        }
-        gun.root.lookAt(_lookTarget); // +Z of the rig (the barrel) faces the aim point
-
-        // Size the gun to the real hand so it fits the palm at any distance from the camera
+        // Scale: real hand size (pixels per metre) -> gun/hand units so everything is life-sized
         let fitScale = 0.9;
         if (liveHand) {
-          const worldPerScreenH =
-            2 * GUN_HAND_DISTANCE * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
-          const gunLenWorld = Math.max(0.05, mpState.handScale) * GUN_TO_PALM_RATIO * worldPerScreenH;
-          fitScale = THREE.MathUtils.clamp(gunLenWorld / GUN_NATIVE_LENGTH, 0.35, 2.4);
+          fitScale = THREE.MathUtils.clamp(
+            mpState.handScale * 2 * GUN_HAND_DISTANCE * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)),
+            0.4,
+            2.4,
+          );
         }
         const gunScale01 = fitScale * gunOpacitySmooth;
         gun.root.scale.setScalar(gunScale01);
 
-        // Slide the gun so its GRIP (not its centre) sits in the palm
-        _vec3C.copy(GUN_GRIP_LOCAL).multiplyScalar(gunScale01).applyQuaternion(gun.root.quaternion);
-        gun.root.position.sub(_vec3C);
+        if (liveHand) {
+          // The gun + virtual hand take the REAL hand's exact orientation:
+          //   +Z (barrel) = wrist -> knuckles, +Y (sights) = pinky -> index knuckle
+          _handFwd.normalize();
+          _handUp.addScaledVector(_handFwd, -_handUp.dot(_handFwd)).normalize();
+          _basisX.crossVectors(_handUp, _handFwd).normalize();
+          _basisM.makeBasis(_basisX, _handUp, _handFwd);
+          gun.root.quaternion.setFromRotationMatrix(_basisM);
+
+          // Left-hand mesh by default; mirror for a right hand (swap button fixes a wrong guess)
+          const mirrorHand = mpState.handIsRight !== swapHandRef.current;
+          gun.hand.scale.x = mirrorHand ? -1 : 1;
+
+          // Put the virtual palm exactly on the real palm
+          _anchorLocal.copy(VIRTUAL_HAND_ANCHOR);
+          if (mirrorHand) _anchorLocal.x = -_anchorLocal.x;
+          _vec3C.copy(_anchorLocal).multiplyScalar(gunScale01).applyQuaternion(gun.root.quaternion);
+          gun.root.position.copy(_handPos).sub(_vec3C);
+        } else {
+          // Simulator gun (desktop test): fixed spot aiming at the reticle
+          _ndc.set(effHandX * 2 - 1, -(effHandY * 2 - 1));
+          _vec3A.set(_ndc.x, _ndc.y, 0.5).unproject(camera);
+          _vec3A.sub(camera.position).normalize();
+          gun.root.position.copy(camera.position).addScaledVector(_vec3A, GUN_HAND_DISTANCE);
+          if (rayHitPoint) {
+            _lookTarget.copy(rayHitPoint);
+          } else {
+            _ndc.set(effAimX * 2 - 1, -(effAimY * 2 - 1));
+            _raycaster.setFromCamera(_ndc, camera);
+            _lookTarget.copy(_raycaster.ray.origin).addScaledVector(_raycaster.ray.direction, 8);
+          }
+          gun.root.up.set(0, 1, 0);
+          gun.root.lookAt(_lookTarget);
+          _vec3C.copy(GUN_GRIP_LOCAL).multiplyScalar(gunScale01).applyQuaternion(gun.root.quaternion);
+          gun.root.position.sub(_vec3C);
+        }
 
         // Recoil kick, slide blowback, reload tilt, and muzzle flash
         gunKickPitch = THREE.MathUtils.damp(gunKickPitch, 0, 14, delta);

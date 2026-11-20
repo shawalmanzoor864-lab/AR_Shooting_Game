@@ -1,10 +1,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CEILING_Y, FLOOR_Y, GUARDIAN_BOX_HALF_SIZE } from './types';
 
 export interface ARGunRig {
   root: THREE.Group;
   gunPivot: THREE.Group;
+  /** Virtual Quest-style hand gripping the pistol (left-hand mesh; mirror X for a right hand) */
+  hand: THREE.Group;
   /** Animated slide group (blowback is applied on its local Z, rig forward = +Z) */
   slide: THREE.Object3D;
   /** Animated magazine group (reload drop is applied on its local Y) */
@@ -216,6 +219,78 @@ export function createGuardianFloorTexture(maxAnisotropy: number): THREE.CanvasT
   return texture;
 }
 
+
+// ---------------------------------------------------------------------------
+// Virtual "Quest style" hand that grips the pistol. It is attached to the gun rig so it follows the
+// real hand's position / rotation / size. Built as a LEFT hand on the +X side of the gun
+// (gun frame: +Z barrel, +Y up, +X = shooter's left); a right hand is this mesh mirrored in X.
+// ---------------------------------------------------------------------------
+export const VIRTUAL_HAND_ANCHOR = new THREE.Vector3(0.04, -0.02, -0.01); // palm centre in gun space (left-hand version)
+
+interface HandFingerDef {
+  name: string;
+  points: THREE.Vector3[];
+  radii: number[];
+}
+
+const HAND_FINGERS: HandFingerDef[] = [
+  { name: 'index', points: [new THREE.Vector3(0.034, 0.014, 0.004), new THREE.Vector3(0.03, 0.02, 0.04), new THREE.Vector3(0.028, 0.022, 0.07), new THREE.Vector3(0.028, 0.022, 0.092)], radii: [0.0105, 0.0095, 0.0085, 0.0075] },
+  { name: 'middle', points: [new THREE.Vector3(0.034, -0.0125, 0.004), new THREE.Vector3(0.03, -0.0125, 0.022), new THREE.Vector3(0, -0.0125, 0.031), new THREE.Vector3(-0.024, -0.0125, 0.022), new THREE.Vector3(-0.03, -0.0125, 0.004)], radii: [0.011, 0.01, 0.0095, 0.009, 0.008] },
+  { name: 'ring', points: [new THREE.Vector3(0.034, -0.037, 0.004), new THREE.Vector3(0.03, -0.037, 0.022), new THREE.Vector3(0, -0.037, 0.031), new THREE.Vector3(-0.024, -0.037, 0.022), new THREE.Vector3(-0.03, -0.037, 0.004)], radii: [0.0105, 0.0095, 0.009, 0.0085, 0.0075] },
+  { name: 'pinky', points: [new THREE.Vector3(0.034, -0.0615, 0.004), new THREE.Vector3(0.03, -0.0615, 0.02), new THREE.Vector3(0.002, -0.0615, 0.028), new THREE.Vector3(-0.02, -0.0615, 0.02), new THREE.Vector3(-0.026, -0.0615, 0.004)], radii: [0.009, 0.0082, 0.0078, 0.0072, 0.0065] },
+  { name: 'thumb', points: [new THREE.Vector3(0.022, 0.022, -0.06), new THREE.Vector3(-0.012, 0.03, -0.056), new THREE.Vector3(-0.028, 0.03, -0.03), new THREE.Vector3(-0.03, 0.03, 0), new THREE.Vector3(-0.03, 0.032, 0.03)], radii: [0.0125, 0.0115, 0.0105, 0.0095, 0.0085] },
+];
+
+function buildVirtualHand(): THREE.Group {
+  const geos: THREE.BufferGeometry[] = [];
+  const yAxis = new THREE.Vector3(0, 1, 0);
+
+  const addSphere = (p: THREE.Vector3, r: number, sx = 1, sy = 1, sz = 1) => {
+    const g = new THREE.SphereGeometry(r, 14, 10);
+    g.scale(sx, sy, sz);
+    g.translate(p.x, p.y, p.z);
+    geos.push(g);
+  };
+  const addBone = (a: THREE.Vector3, b: THREE.Vector3, rA: number, rB: number) => {
+    const dir = b.clone().sub(a);
+    const len = dir.length();
+    if (len < 1e-5) return;
+    const g = new THREE.CylinderGeometry(rB, rA, len, 10, 1, true);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(yAxis, dir.normalize()));
+    const mid = a.clone().add(b).multiplyScalar(0.5);
+    g.translate(mid.x, mid.y, mid.z);
+    geos.push(g);
+  };
+
+  for (const f of HAND_FINGERS) {
+    for (let i = 0; i < f.points.length; i++) {
+      addSphere(f.points[i], f.radii[i]);
+      if (i < f.points.length - 1) addBone(f.points[i], f.points[i + 1], f.radii[i], f.radii[i + 1]);
+    }
+  }
+
+  // Palm (flattened ellipsoid), back-of-hand knuckle bumps and wrist / forearm
+  addSphere(new THREE.Vector3(0.041, -0.03, -0.04), 1, 0.017, 0.043, 0.052);
+  addBone(new THREE.Vector3(0.042, -0.03, -0.085), new THREE.Vector3(0.04, -0.03, -0.15), 0.03, 0.034);
+  addSphere(new THREE.Vector3(0.04, -0.03, -0.15), 0.03);
+
+  const merged = mergeGeometries(geos, false);
+  geos.forEach((g) => g.dispose());
+
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xdbe5ef,
+    roughness: 0.5,
+    metalness: 0.0,
+    emissive: 0x20324a,
+    emissiveIntensity: 0.4,
+  });
+  const group = new THREE.Group();
+  if (merged) {
+    group.add(new THREE.Mesh(merged, material));
+  }
+  return group;
+}
+
 export function createARGunModel(gunScene: THREE.Object3D): ARGunRig {
   const root = new THREE.Group();
   const gunPivot = new THREE.Group();
@@ -250,6 +325,11 @@ export function createARGunModel(gunScene: THREE.Object3D): ARGunRig {
       bodyPart.orient.add(child); // frame, barrel, grips
     }
   }
+
+  // Virtual hand gripping the pistol (shown only while a real hand is tracked)
+  const hand = buildVirtualHand();
+  hand.visible = false;
+  gunPivot.add(hand);
 
   // Thin laser guide ray starting at the muzzle (scaled along Z by the game loop)
   const laserGeo = new THREE.CylinderGeometry(0.0014, 0.0014, 1, 6);
@@ -292,6 +372,7 @@ export function createARGunModel(gunScene: THREE.Object3D): ARGunRig {
   return {
     root,
     gunPivot,
+    hand,
     slide: slidePart.holder,
     magazine: magPart.holder,
     slideRestZ: 0,

@@ -10,9 +10,9 @@ type Vision = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
 
 interface RecoilSample {
   t: number;
-  tipY: number; // screen px
+  knuckleY: number; // screen px (average of the four finger-base knuckles)
   wristY: number; // screen px
-  palmPx: number;
+  unit: number; // screen px of ~9.5 cm of real hand (a "palm unit")
 }
 
 const HAND_MODEL_URL =
@@ -20,18 +20,17 @@ const HAND_MODEL_URL =
 const POSE_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 
-// Run hand detection at most ~24 times per second. The 3D scene and gun keep rendering at full
-// speed in between (the gun is smoothed every frame), so the game stays fluid on phones.
+// Hand detection runs ~24 times per second; the gun / hand are smoothed every rendered frame.
 const MIN_DETECT_INTERVAL_MS = 42;
 const POSE_INTERVAL_MS = 140;
 
-// Recoil gesture tuning (distances are in "palm lengths" so it works at any hand distance)
-const RECOIL_MIN_TIP_RISE = 0.24; // fingertip must flick up by this many palm lengths ...
-const RECOIL_MIN_VELOCITY = 2.6; // ... faster than this many palm lengths per second ...
-const RECOIL_MIN_RELATIVE_RISE = 0.08; // ... and rise more than the wrist (finger pitches up)
-const RECOIL_MAX_PRE_SPEED = 2.0; // hand must have been fairly steady just before the flick
+// Recoil gesture tuning, measured in "palm units" (about 9.5 cm of real hand) so it works at any distance
+const RECOIL_MIN_RISE = 0.28; // the hand must snap up at least this far ...
+const RECOIL_MAX_RISE = 1.7; // ... but a huge arm lift is not a recoil
+const RECOIL_MIN_VELOCITY = 2.4; // ... faster than this many units per second ...
+const RECOIL_MAX_PRE_SPEED = 1.8; // ... after being fairly steady just before
 const RECOIL_COOLDOWN_MS = 420;
-const RECOIL_MIN_STABLE_FRAMES = 5; // gun pose must be held this many detections before it can fire
+const RECOIL_MIN_STABLE_FRAMES = 6; // hand must be tracked this many detections before it can fire
 
 interface P2 {
   x: number;
@@ -44,8 +43,16 @@ interface V3 {
 }
 
 const dist2 = (a: P2, b: P2) => Math.hypot(a.x - b.x, a.y - b.y);
-const dist3 = (a: V3, b: V3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const sub = (a: V3, b: V3): V3 => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+const len3 = (a: V3) => Math.hypot(a.x, a.y, a.z);
+const norm = (a: V3): V3 => {
+  const l = len3(a) || 1;
+  return { x: a.x / l, y: a.y / l, z: a.z / l };
+};
+const dot = (a: V3, b: V3) => a.x * b.x + a.y * b.y + a.z * b.z;
+
+type DetectOptions = { mirrored: boolean; checkFeet: boolean; screenW: number; screenH: number };
 
 export class MediaPipeGestureTracker {
   private handLandmarker: HandLandmarker | null = null;
@@ -61,33 +68,35 @@ export class MediaPipeGestureTracker {
   private lastCallMs = 0;
   private lastPoseTime = 0;
 
-  // Gesture hysteresis
-  private gunPoseStreak = 0;
-  private gunLostStreak = 0;
-  private gunLocked = false;
+  // Hand presence (ANY hand, ANY gesture)
   private handLostStreak = 99;
-  private stableFrames = 0;
+  private handPresentStreak = 0;
+  private handLocked = false;
+  private rightScore = 0;
 
   // Raw targets (updated at detection rate) ...
   private tgtHandX = 0.55;
   private tgtHandY = 0.65;
   private tgtAimX = 0.5;
   private tgtAimY = 0.45;
-  private tgtScale = 0.16;
+  private tgtScale = 1.8;
   private tgtRoll = 0;
   private tgtUp: V3 = { x: 0, y: 1, z: 0 };
+  private tgtFwd: V3 = { x: 0, y: 0, z: -1 };
+  private displayRight = true;
 
   // ... and smoothed values (stepped every rendered frame)
   private smoothHandX = 0.55;
   private smoothHandY = 0.65;
   private smoothAimX = 0.5;
   private smoothAimY = 0.45;
-  private smoothScale = 0.16;
+  private smoothScale = 1.8;
   private smoothRoll = 0;
   private smoothUp: V3 = { x: 0, y: 1, z: 0 };
+  private smoothFwd: V3 = { x: 0, y: 0, z: -1 };
 
   private stability = 0.5;
-  private aimHistory: P2[] = [];
+  private fwdHistory: V3[] = [];
   private recoilBuffer: RecoilSample[] = [];
   private lastRecoilFireMs = 0;
   private recoilArmed = true;
@@ -162,7 +171,7 @@ export class MediaPipeGestureTracker {
   public processVideoFrame(
     video: HTMLVideoElement,
     nowMs: number,
-    options: { mirrored: boolean; checkFeet: boolean; screenW: number; screenH: number },
+    options: DetectOptions,
   ): HandGestureState {
     const dt = clamp((nowMs - (this.lastCallMs || nowMs - 16)) / 1000, 0.001, 0.1);
     this.lastCallMs = nowMs;
@@ -189,11 +198,7 @@ export class MediaPipeGestureTracker {
     return this.buildState(options.checkFeet);
   }
 
-  private detect(
-    video: HTMLVideoElement,
-    nowMs: number,
-    options: { mirrored: boolean; checkFeet: boolean; screenW: number; screenH: number },
-  ) {
+  private detect(video: HTMLVideoElement, nowMs: number, options: DetectOptions) {
     // Optional foot detection when the phone points down at the floor
     if (options.checkFeet) {
       this.ensurePose();
@@ -222,130 +227,112 @@ export class MediaPipeGestureTracker {
     const handRes = this.handLandmarker!.detectForVideo(video, nowMs);
     if (!handRes.landmarks || handRes.landmarks.length === 0) {
       this.handLostStreak++;
-      this.gunPoseStreak = 0;
-      this.gunLostStreak++;
-      this.stableFrames = 0;
-      if (this.gunLostStreak > 6) {
-        this.gunLocked = false;
+      this.handPresentStreak = 0;
+      if (this.handLostStreak > 9) {
+        this.handLocked = false;
         this.recoilBuffer = [];
+        this.fwdHistory = [];
       }
       return;
     }
     this.handLostStreak = 0;
+    this.handPresentStreak++;
+    if (this.handPresentStreak >= 2) this.handLocked = true;
 
     const lm = handRes.landmarks[0];
     const wl = handRes.worldLandmarks?.[0] as V3[] | undefined;
+    const hasWorld = !!wl && wl.length >= 21;
 
-    // ---- Screen-space (pixel) landmarks, correctly mapped through the object-cover video crop ----
-    const px = (i: number): P2 => this.toScreen(lm[i], video, options);
-    const p0 = px(0);
-    const p5 = px(5);
-    const p8 = px(8);
-    const p9 = px(9);
-    const p13 = px(13);
-    const p17 = px(17);
-
-    const palmLen = dist2(p0, p9);
-    const palmWid = dist2(p5, p17) * 1.1;
-    const palmPx = Math.max(palmLen, palmWid, 24);
-
-    // ---- Gun pose classification using real 3D (world) landmarks: immune to foreshortening ----
-    let rawGun = false;
-    if (wl && wl.length >= 21) {
-      const w0 = wl[0];
-      const ratio = (tip: number, mcp: number) => dist3(wl[tip], w0) / Math.max(dist3(wl[mcp], w0), 1e-4);
-      const indexR = ratio(8, 5);
-      const midR = ratio(12, 9);
-      const ringR = ratio(16, 13);
-      const pinkyR = ratio(20, 17);
-      const curled =
-        (midR < 1.55 ? 1 : 0) + (ringR < 1.55 ? 1 : 0) + (pinkyR < 1.55 ? 1 : 0);
-      const indexExtended = indexR > 1.3;
-      const indexLeads = indexR > Math.max(midR, ringR, pinkyR) + 0.12;
-      rawGun = indexExtended && curled >= 2 && indexLeads;
-    } else {
-      const idxLen = dist2(p8, p5) / palmPx;
-      const midTip = px(12);
-      const ringTip = px(16);
-      const pinkyTip = px(20);
-      const curledTip = (t: P2, base: P2) => dist2(t, base) < palmPx * 0.85;
-      rawGun =
-        idxLen > 0.55 &&
-        (curledTip(midTip, p9) ? 1 : 0) + (curledTip(ringTip, p13) ? 1 : 0) + (curledTip(pinkyTip, p17) ? 1 : 0) >= 2;
+    // ---- Which hand is it? MediaPipe assumes a mirrored image, so for raw video the label is swapped ----
+    const label = handRes.handedness?.[0]?.[0]?.categoryName;
+    if (label) {
+      this.rightScore = clamp(this.rightScore + (label === 'Left' ? 1 : -1), -4, 4);
     }
+    const actuallyRight = this.rightScore > 0;
+    // What the person SEES: the front camera is displayed mirrored, which flips the hand's look
+    this.displayRight = actuallyRight !== options.mirrored;
 
-    if (rawGun) {
-      this.gunPoseStreak++;
-      this.gunLostStreak = 0;
-      this.stableFrames++;
-      if (this.gunPoseStreak >= 2) this.gunLocked = true;
-    } else {
-      this.gunPoseStreak = 0;
-      this.gunLostStreak++;
-      this.stableFrames = 0;
-      if (this.gunLostStreak > 9) this.gunLocked = false;
+    // ---- Screen-space (pixel) landmarks, mapped through the object-cover video crop ----
+    const P: P2[] = lm.map((l) => this.toScreen(l, video, options));
+    const p0 = P[0];
+    const p5 = P[5];
+    const p9 = P[9];
+    const p13 = P[13];
+    const p17 = P[17];
+
+    const palmPx = Math.max(dist2(p0, p9), dist2(p5, p17) * 1.1, 24);
+
+    // ---- Real scale: screen pixels per real metre, immune to foreshortening ----
+    let pxPerMeter = palmPx / 0.1;
+    if (hasWorld) {
+      const pairs: Array<[number, number]> = [
+        [0, 5], [0, 9], [0, 13], [0, 17], [5, 9], [9, 13], [13, 17], [5, 17],
+      ];
+      let pxSum = 0;
+      let wSum = 0;
+      for (const [i, j] of pairs) {
+        pxSum += dist2(P[i], P[j]);
+        wSum += Math.hypot(wl![i].x - wl![j].x, wl![i].y - wl![j].y);
+      }
+      if (wSum > 0.02) pxPerMeter = clamp(pxSum / wSum, palmPx / 0.17, palmPx / 0.055);
     }
+    this.tgtScale = pxPerMeter / options.screenH;
 
-    // ---- Where the gun grip sits: the centre of the palm ----
+    // ---- Palm centre (where the gun / virtual hand is anchored) ----
     const cx = p0.x * 0.2 + p5.x * 0.3 + p9.x * 0.2 + p13.x * 0.15 + p17.x * 0.15;
     const cy = p0.y * 0.2 + p5.y * 0.3 + p9.y * 0.2 + p13.y * 0.15 + p17.y * 0.15;
     this.tgtHandX = cx / options.screenW;
     this.tgtHandY = cy / options.screenH;
-    this.tgtScale = palmPx / options.screenH;
 
-    // ---- Aim point: continue the index finger line slightly past the fingertip ----
-    const ax = p8.x + (p8.x - p5.x) * 0.45;
-    const ay = p8.y + (p8.y - p5.y) * 0.45 - 0.02 * options.screenH;
-    const rawAimX = clamp(ax / options.screenW, 0.05, 0.95);
-    const rawAimY = clamp(ay / options.screenH, 0.05, 0.95);
-    this.tgtAimX = rawAimX;
-    this.tgtAimY = rawAimY;
+    // ---- Hand frame in camera space (three.js axes: x right, y up, z toward the viewer) ----
+    const sx = options.mirrored ? -1 : 1;
+    const cam = (i: number): V3 =>
+      hasWorld
+        ? { x: wl![i].x * sx, y: -wl![i].y, z: -wl![i].z }
+        : { x: (lm[i].x - 0.5) * sx, y: -(lm[i].y - 0.5), z: -lm[i].z };
+
+    const wrist = cam(0);
+    const knuckleMid: V3 = {
+      x: (cam(5).x + cam(9).x + cam(13).x + cam(17).x) / 4,
+      y: (cam(5).y + cam(9).y + cam(13).y + cam(17).y) / 4,
+      z: (cam(5).z + cam(9).z + cam(13).z + cam(17).z) / 4,
+    };
+    const fwd = norm(sub(knuckleMid, wrist)); // wrist -> knuckles = barrel direction
+    let across = sub(cam(5), cam(17)); // pinky -> index knuckle = gun "up"
+    const d = dot(across, fwd);
+    across = { x: across.x - d * fwd.x, y: across.y - d * fwd.y, z: across.z - d * fwd.z };
+    if (len3(across) > 1e-5 && len3(fwd) > 0.5) {
+      this.tgtFwd = fwd;
+      this.tgtUp = norm(across);
+    }
     this.tgtRoll = Math.atan2(p5.y - p17.y, p5.x - p17.x);
 
-    // ---- Hand "up" vector (thumb/sights side) so the gun rolls exactly with the hand ----
-    if (wl && wl.length >= 21) {
-      const sx = options.mirrored ? -1 : 1;
-      const toCam = (v: V3): V3 => ({ x: v.x * sx, y: -v.y, z: -v.z });
-      const a = toCam(wl[5]);
-      const b = toCam(wl[17]);
-      const t = toCam(wl[8]);
-      const fwd = { x: t.x - a.x, y: t.y - a.y, z: t.z - a.z };
-      const fl = Math.hypot(fwd.x, fwd.y, fwd.z) || 1;
-      fwd.x /= fl;
-      fwd.y /= fl;
-      fwd.z /= fl;
-      const up = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
-      const d = up.x * fwd.x + up.y * fwd.y + up.z * fwd.z;
-      up.x -= d * fwd.x;
-      up.y -= d * fwd.y;
-      up.z -= d * fwd.z;
-      const ul = Math.hypot(up.x, up.y, up.z);
-      if (ul > 1e-4) {
-        this.tgtUp = { x: up.x / ul, y: up.y / ul, z: up.z / ul };
-      }
-    }
+    // Fallback aim (screen) in case the 3D direction is unusable
+    this.tgtAimX = clamp((p9.x + (p9.x - p0.x) * 0.9) / options.screenW, 0.05, 0.95);
+    this.tgtAimY = clamp((p9.y + (p9.y - p0.y) * 0.9) / options.screenH, 0.05, 0.95);
 
-    // ---- Steadiness (jitter over recent detections) ----
-    this.aimHistory.push({ x: rawAimX, y: rawAimY });
-    if (this.aimHistory.length > 8) this.aimHistory.shift();
+    // ---- Steadiness: how much the pointing direction jitters ----
+    this.fwdHistory.push({ ...this.tgtFwd });
+    if (this.fwdHistory.length > 8) this.fwdHistory.shift();
     let jitterSum = 0;
-    for (let i = 1; i < this.aimHistory.length; i++) {
-      jitterSum += dist2(this.aimHistory[i], this.aimHistory[i - 1]);
+    for (let i = 1; i < this.fwdHistory.length; i++) {
+      jitterSum += len3(sub(this.fwdHistory[i], this.fwdHistory[i - 1]));
     }
-    const avgJitter = this.aimHistory.length > 1 ? jitterSum / (this.aimHistory.length - 1) : 0;
-    this.stability = clamp(1 - avgJitter * 28, 0.15, 1);
+    const avgJitter = this.fwdHistory.length > 1 ? jitterSum / (this.fwdHistory.length - 1) : 0;
+    this.stability = clamp(1 - avgJitter * 7, 0.15, 1);
 
-    // ---- Recoil gesture ----
-    this.updateRecoil(nowMs, p8.y, p0.y, palmPx, rawGun);
+    // ---- Recoil gesture (the ONLY thing that fires) ----
+    const knuckleY = (p5.y + p9.y + p13.y + p17.y) / 4;
+    this.updateRecoil(nowMs, knuckleY, p0.y, pxPerMeter * 0.095);
   }
 
   /**
-   * A shot is fired ONLY by a real recoil flick: the fingertip snaps upward quickly (the finger
-   * pitches up relative to the wrist) after the hand was held steady, while the gun pose is held.
-   * Slow hand movement, sweeping the whole arm, or just raising the hand never fires.
+   * A shot is fired ONLY by a recoil flick: the hand snaps upward quickly (a small, sharp kick like a
+   * real pistol) after it was held fairly steady. Slow movement, big arm lifts, or just showing the
+   * hand never fires. Works for any hand shape.
    */
-  private updateRecoil(nowMs: number, tipY: number, wristY: number, palmPx: number, rawGun: boolean) {
-    this.recoilBuffer.push({ t: nowMs, tipY, wristY, palmPx });
+  private updateRecoil(nowMs: number, knuckleY: number, wristY: number, unit: number) {
+    this.recoilBuffer.push({ t: nowMs, knuckleY, wristY, unit });
     while (this.recoilBuffer.length > 14) this.recoilBuffer.shift();
 
     this.recoilEnergy = 0;
@@ -355,7 +342,7 @@ export class MediaPipeGestureTracker {
     const latest = buf[buf.length - 1];
     const prevSample = buf[buf.length - 2];
     const lastDt = Math.max(0.001, (latest.t - prevSample.t) / 1000);
-    const instSpeed = Math.abs(latest.tipY - prevSample.tipY) / latest.palmPx / lastDt;
+    const instSpeed = Math.abs(latest.knuckleY - prevSample.knuckleY) / latest.unit / lastDt;
 
     // Re-arm once the hand has calmed down after a shot
     if (!this.recoilArmed) {
@@ -365,7 +352,7 @@ export class MediaPipeGestureTracker {
       }
     }
 
-    if (!this.gunLocked || !rawGun || this.stableFrames < RECOIL_MIN_STABLE_FRAMES) return;
+    if (!this.handLocked || this.handPresentStreak < RECOIL_MIN_STABLE_FRAMES) return;
 
     let bestScore = 0;
     let windowStartT = latest.t;
@@ -374,15 +361,10 @@ export class MediaPipeGestureTracker {
       const dt = (latest.t - prev.t) / 1000;
       if (dt < 0.04) continue;
       if (dt > 0.22) break;
-      const tipRise = (prev.tipY - latest.tipY) / latest.palmPx;
-      const wristRise = (prev.wristY - latest.wristY) / latest.palmPx;
-      const velocity = tipRise / dt;
-      const relative = tipRise - Math.max(0, wristRise) * 0.6;
-      const score = Math.min(
-        tipRise / RECOIL_MIN_TIP_RISE,
-        velocity / RECOIL_MIN_VELOCITY,
-        relative / RECOIL_MIN_RELATIVE_RISE,
-      );
+      const rise = (prev.knuckleY - latest.knuckleY) / latest.unit;
+      if (rise > RECOIL_MAX_RISE) continue;
+      const velocity = rise / dt;
+      const score = Math.min(rise / RECOIL_MIN_RISE, velocity / RECOIL_MIN_VELOCITY);
       if (score > bestScore) {
         bestScore = score;
         windowStartT = prev.t;
@@ -396,7 +378,7 @@ export class MediaPipeGestureTracker {
       for (let i = 1; i < buf.length; i++) {
         if (buf[i].t > windowStartT) break;
         const dt = Math.max(0.001, (buf[i].t - buf[i - 1].t) / 1000);
-        preMax = Math.max(preMax, Math.abs(buf[i].tipY - buf[i - 1].tipY) / buf[i].palmPx / dt);
+        preMax = Math.max(preMax, Math.abs(buf[i].knuckleY - buf[i - 1].knuckleY) / buf[i].unit / dt);
       }
       if (preMax <= RECOIL_MAX_PRE_SPEED) {
         this.pendingRecoil = true;
@@ -430,22 +412,26 @@ export class MediaPipeGestureTracker {
     const kPos = k(24);
     const kAim = k(18);
     const kScale = k(12);
-    const kRoll = k(16);
+    const kDir = k(14);
     this.smoothHandX += (this.tgtHandX - this.smoothHandX) * kPos;
     this.smoothHandY += (this.tgtHandY - this.smoothHandY) * kPos;
     this.smoothAimX += (this.tgtAimX - this.smoothAimX) * kAim;
     this.smoothAimY += (this.tgtAimY - this.smoothAimY) * kAim;
     this.smoothScale += (this.tgtScale - this.smoothScale) * kScale;
-    this.smoothRoll += (this.tgtRoll - this.smoothRoll) * kRoll;
+    this.smoothRoll += (this.tgtRoll - this.smoothRoll) * kDir;
 
-    const u = this.smoothUp;
-    u.x += (this.tgtUp.x - u.x) * kRoll;
-    u.y += (this.tgtUp.y - u.y) * kRoll;
-    u.z += (this.tgtUp.z - u.z) * kRoll;
-    const l = Math.hypot(u.x, u.y, u.z) || 1;
-    u.x /= l;
-    u.y /= l;
-    u.z /= l;
+    for (const [smooth, target] of [
+      [this.smoothUp, this.tgtUp],
+      [this.smoothFwd, this.tgtFwd],
+    ] as Array<[V3, V3]>) {
+      smooth.x += (target.x - smooth.x) * kDir;
+      smooth.y += (target.y - smooth.y) * kDir;
+      smooth.z += (target.z - smooth.z) * kDir;
+      const l = len3(smooth) || 1;
+      smooth.x /= l;
+      smooth.y /= l;
+      smooth.z /= l;
+    }
   }
 
   private buildState(checkFeet: boolean): HandGestureState {
@@ -454,8 +440,9 @@ export class MediaPipeGestureTracker {
     this.pendingRecoil = false;
     return {
       handDetected,
-      isGunPose: this.gunLocked && handDetected,
-      confidence: this.gunLocked ? 0.94 : handDetected ? 0.45 : 0,
+      // Any visible hand, in ANY gesture, holds the gun
+      isGunPose: this.handLocked && handDetected,
+      confidence: this.handLocked ? 0.94 : handDetected ? 0.45 : 0,
       handScreenX: this.smoothHandX,
       handScreenY: this.smoothHandY,
       aimScreenX: this.smoothAimX,
@@ -465,6 +452,10 @@ export class MediaPipeGestureTracker {
       handUpX: this.smoothUp.x,
       handUpY: this.smoothUp.y,
       handUpZ: this.smoothUp.z,
+      handForwardX: this.smoothFwd.x,
+      handForwardY: this.smoothFwd.y,
+      handForwardZ: this.smoothFwd.z,
+      handIsRight: this.displayRight,
       stability: this.stability,
       recoilEnergy: this.recoilEnergy,
       recoilTriggered,
