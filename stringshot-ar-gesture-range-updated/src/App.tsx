@@ -76,8 +76,16 @@ export default function App() {
   const currentLevel = GAME_LEVELS[levelIndex] ?? GAME_LEVELS[0];
 
   const startMission = useCallback(async (idx: number) => {
-    audioEngine.unlock();
-    await controllerRef.current?.enableSensors();
+    try {
+      audioEngine.unlock();
+    } catch {
+      // ignore audio unlock failure
+    }
+    try {
+      await controllerRef.current?.enableSensors();
+    } catch {
+      // sensors denied/unsupported: game still starts in simulator mode
+    }
     setLevelIndex(idx);
     controllerRef.current?.startLevel(idx);
     setPhase('playing');
@@ -416,8 +424,8 @@ export default function App() {
 
       {/* MAIN MENU / CALIBRATION LOBBY */}
       {phase === 'menu' && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center p-4 bg-[#090D12]/80 overflow-y-auto">
-          <div className="w-full max-w-3xl bg-[#0F1622] border border-slate-700/80 rounded-2xl p-6 sm:p-8 shadow-2xl">
+        <div className="absolute inset-0 z-30 flex p-3 sm:p-4 bg-[#090D12]/80 overflow-y-auto" style={{ touchAction: 'pan-y', WebkitOverflowScrolling: 'touch' }}>
+          <div className="relative w-full max-w-3xl m-auto bg-[#0F1622] border border-slate-700/80 rounded-2xl p-4 sm:p-8 shadow-2xl">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
               <div>
                 <div className="text-xs font-medium text-cyan-400">
@@ -430,7 +438,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => startMission(levelIndex)}
-                className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-base transition-colors whitespace-nowrap shrink-0"
+                className="hidden sm:inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-base transition-colors whitespace-nowrap shrink-0"
               >
                 <Crosshair className="w-5 h-5" />
                 Launch Level {levelIndex + 1}
@@ -469,7 +477,7 @@ export default function App() {
                   {hud.cameraActive ? 'Live Camera Ready' : 'Range Simulator Fallback Ready'}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                 {GAME_LEVELS.map((lvl, idx) => {
                   const selected = idx === levelIndex;
                   return (
@@ -500,6 +508,18 @@ export default function App() {
                 <span className="font-semibold text-white">{currentLevel.subtitle}:</span>{' '}
                 {currentLevel.briefing}
               </p>
+            </div>
+
+            {/* Mobile: always-visible launch button */}
+            <div className="sm:hidden sticky bottom-0 -mx-4 -mb-4 mt-4 px-4 py-3 bg-[#0F1622]/95 border-t border-slate-800 rounded-b-2xl">
+              <button
+                type="button"
+                onClick={() => startMission(levelIndex)}
+                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-amber-500 active:bg-amber-400 text-slate-950 font-display font-bold text-base"
+              >
+                <Crosshair className="w-5 h-5" />
+                Launch Level {levelIndex + 1}
+              </button>
             </div>
           </div>
         </div>
