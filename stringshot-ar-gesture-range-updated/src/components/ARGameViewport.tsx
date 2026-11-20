@@ -93,6 +93,12 @@ const _shotRaycaster = new THREE.Raycaster();
 const _quatA = new THREE.Quaternion();
 const _unitZ = new THREE.Vector3(0, 0, 1);
 
+// AR gun <-> hand fitting
+const GUN_HAND_DISTANCE = 0.5; // metres in front of the camera the gun is drawn
+const GUN_NATIVE_LENGTH = 0.229; // pistol length in the rig (metres)
+const GUN_TO_PALM_RATIO = 2.3; // a pistol is ~2.3x the length of a palm (wrist to middle knuckle)
+const GUN_GRIP_LOCAL = new THREE.Vector3(0, -0.02, -0.02); // grip centre in rig space (barrel = +Z)
+
 const BOARD_HALF_W = TARGET_BOARD_WIDTH * 0.5;
 const BOARD_HALF_H = TARGET_BOARD_HEIGHT * 0.5;
 
@@ -140,15 +146,18 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
     })();
 
     // 2. Renderer + Scene + Camera
+    const isMobile =
+      typeof window !== 'undefined' &&
+      (window.matchMedia?.('(pointer: coarse)').matches || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent));
     const renderer = new THREE.WebGLRenderer({
       alpha: true,
-      antialias: !isSoftwareGl,
+      antialias: !isSoftwareGl && !isMobile,
       powerPreference: 'high-performance',
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.1;
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, isMobile ? 1.25 : 2));
     renderer.setSize(mountEl.clientWidth, mountEl.clientHeight);
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
@@ -313,8 +322,9 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: facing },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+            width: { ideal: 960 },
+            height: { ideal: 540 },
+            frameRate: { ideal: 30, max: 30 },
           },
           audio: false,
         });
@@ -747,10 +757,12 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
 
       // Process MediaPipe Hand & Foot landmarks if camera active
       const mirrored = cameraFacingRef.current === 'user';
-      const mpState: HandGestureState = cameraActive
+      const mpState: HandGestureState = cameraActive && curPhase === 'playing'
         ? mpTracker.processVideoFrame(videoEl, nowMs, {
             mirrored,
-            checkFeet: isLookingAtFeet && curPhase === 'playing',
+            checkFeet: isLookingAtFeet,
+            screenW: renderer.domElement.clientWidth || mountEl.clientWidth,
+            screenH: renderer.domElement.clientHeight || mountEl.clientHeight,
           })
         : {
             handDetected: false,
@@ -762,6 +774,9 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
             aimScreenY: simAimY,
             handRoll: 0,
             handScale: 0.22,
+            handUpX: 0,
+            handUpY: 1,
+            handUpZ: 0,
             stability: 0.85,
             recoilEnergy: 0,
             recoilTriggered: false,
@@ -998,12 +1013,13 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
       const gun = gunRig;
       if (gun && gunOpacitySmooth > 0.03) {
         gun.root.visible = true;
-        // Position gun in front of camera matching hand screen coordinates
+        const liveHand = mpState.isGunPose;
+
+        // Anchor = centre of the real palm, projected a fixed distance in front of the camera
         _ndc.set(effHandX * 2 - 1, -(effHandY * 2 - 1));
         _vec3A.set(_ndc.x, _ndc.y, 0.5).unproject(camera);
         _vec3A.sub(camera.position).normalize();
-        const gunDist = 0.52;
-        gun.root.position.copy(camera.position).addScaledVector(_vec3A, gunDist);
+        gun.root.position.copy(camera.position).addScaledVector(_vec3A, GUN_HAND_DISTANCE);
 
         // Aim barrel toward the actual aiming ray point far out (or hit point)
         if (rayHitPoint) {
@@ -1013,8 +1029,30 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
           _raycaster.setFromCamera(_ndc, camera);
           _lookTarget.copy(_raycaster.ray.origin).addScaledVector(_raycaster.ray.direction, 8);
         }
+
+        // Roll the gun exactly with the real hand (thumb / sights side = hand "up")
+        if (liveHand) {
+          _vec3B.set(mpState.handUpX, mpState.handUpY, mpState.handUpZ).applyQuaternion(camera.quaternion);
+          gun.root.up.copy(_vec3B);
+        } else {
+          gun.root.up.set(0, 1, 0);
+        }
         gun.root.lookAt(_lookTarget); // +Z of the rig (the barrel) faces the aim point
-        gun.root.scale.setScalar(0.88 * gunOpacitySmooth);
+
+        // Size the gun to the real hand so it fits the palm at any distance from the camera
+        let fitScale = 0.9;
+        if (liveHand) {
+          const worldPerScreenH =
+            2 * GUN_HAND_DISTANCE * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+          const gunLenWorld = Math.max(0.05, mpState.handScale) * GUN_TO_PALM_RATIO * worldPerScreenH;
+          fitScale = THREE.MathUtils.clamp(gunLenWorld / GUN_NATIVE_LENGTH, 0.35, 2.4);
+        }
+        const gunScale01 = fitScale * gunOpacitySmooth;
+        gun.root.scale.setScalar(gunScale01);
+
+        // Slide the gun so its GRIP (not its centre) sits in the palm
+        _vec3C.copy(GUN_GRIP_LOCAL).multiplyScalar(gunScale01).applyQuaternion(gun.root.quaternion);
+        gun.root.position.sub(_vec3C);
 
         // Recoil kick, slide blowback, reload tilt, and muzzle flash
         gunKickPitch = THREE.MathUtils.damp(gunKickPitch, 0, 14, delta);
@@ -1023,7 +1061,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
         const magDrop = isReloading ? Math.sin((reloadTimer / RELOAD_DURATION) * Math.PI) * -0.11 : 0;
 
         // Barrel points along +Z: recoil kicks the muzzle up (-X rotation), reload tilts it down
-        gun.gunPivot.rotation.set(reloadTilt - gunKickPitch, 0, mpState.isGunPose ? -mpState.handRoll * 0.25 : 0);
+        gun.gunPivot.rotation.set(reloadTilt - gunKickPitch, 0, 0);
         gun.slide.position.z = gun.slideRestZ - slideBlowback;
         gun.magazine.position.y = gun.magazineRestY + magDrop;
 
@@ -1100,7 +1138,7 @@ export const ARGameViewport: React.FC<ARGameViewportProps> = ({
       }
 
       // 9. Emit throttled HUD state (~20Hz) so React UI stays silky smooth without thrashing
-      if (nowMs - lastHudEmit > 50) {
+      if (nowMs - lastHudEmit > 100) {
         lastHudEmit = nowMs;
         onHudUpdateRef.current({
           ammo,

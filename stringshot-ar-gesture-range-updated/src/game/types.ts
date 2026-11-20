@@ -45,8 +45,12 @@ export interface HandGestureState {
   aimScreenY: number;
   /** Roll angle in radians of the hand */
   handRoll: number;
-  /** Apparent palm scale for placing the 3D AR gun */
+  /** Apparent palm length as a fraction of the screen height (used to size the 3D AR gun) */
   handScale: number;
+  /** Hand "up" direction (thumb / sights side) in camera space, used to roll the 3D gun with the hand */
+  handUpX: number;
+  handUpY: number;
+  handUpZ: number;
   /** 0..1 steadiness of the hand (higher = tighter aiming dispersion circle) */
   stability: number;
   /** 0..1 instantaneous upward recoil impulse energy */

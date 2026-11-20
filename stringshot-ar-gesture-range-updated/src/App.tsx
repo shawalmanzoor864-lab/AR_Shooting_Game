@@ -67,7 +67,9 @@ export default function App() {
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [levelIndex, setLevelIndex] = useState<number>(0);
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
-  const [simModeEnabled, setSimModeEnabled] = useState<boolean>(true);
+  const [simModeEnabled, setSimModeEnabled] = useState<boolean>(
+    () => !(typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches),
+  );
   const [cameraFacing, setCameraFacing] = useState<'environment' | 'user'>('environment');
   const [muted, setMuted] = useState<boolean>(false);
   const [showSimControls, setShowSimControls] = useState<boolean>(false);
@@ -195,63 +197,32 @@ export default function App() {
         </header>
       )}
 
-      {/* RIGHT-SIDE ERGONOMIC RELOAD BUTTON & 20-BULLET MAGAZINE */}
+      {/* COMPACT AMMO COUNT + SMALL RELOAD BUTTON (kept tiny so it never blocks the view) */}
       {phase === 'playing' && (
-        <aside className="pointer-events-auto absolute right-3 sm:right-5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2.5 bg-[#0C121B]/90 border border-slate-700/80 rounded-2xl p-3 shadow-xl">
-          <div className="text-center">
-            <div className="text-[11px] font-medium text-slate-400">Ammo</div>
-            <div
-              className={`font-mono-num text-xl font-bold ${
-                hud.ammo === 0
-                  ? 'text-rose-400'
-                  : hud.ammo <= 5
-                    ? 'text-amber-400'
-                    : 'text-white'
-              }`}
-            >
-              {hud.ammo}
-              <span className="text-xs text-slate-500">/{hud.maxAmmo}</span>
-            </div>
-          </div>
-
-          {/* 20-Bullet Visual Magazine Stack (2 columns of 10) */}
-          <div className="grid grid-cols-2 gap-1 px-1 py-1 bg-slate-950/70 rounded-lg border border-slate-800">
-            {Array.from({ length: hud.maxAmmo }).map((_, idx) => {
-              const filled = idx < hud.ammo;
-              return (
-                <div
-                  key={idx}
-                  className={`w-3.5 h-1.5 rounded-[2px] transition-colors ${
-                    filled
-                      ? hud.ammo <= 5
-                        ? 'bg-amber-400'
-                        : 'bg-cyan-400'
-                      : 'bg-slate-800'
-                  }`}
-                />
-              );
-            })}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => controllerRef.current?.reload()}
-            disabled={hud.isReloading || hud.ammo === hud.maxAmmo}
-            className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl font-display text-xs font-bold tracking-wide transition-colors whitespace-nowrap ${
-              hud.isReloading
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 cursor-wait'
-                : hud.ammo === 0
-                  ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg'
-                  : hud.ammo < hud.maxAmmo
-                    ? 'bg-cyan-600 hover:bg-cyan-500 text-white'
-                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+        <aside className="pointer-events-auto absolute right-2 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1.5">
+          <div
+            className={`px-2 py-0.5 rounded-full bg-[#0C121B]/70 border border-slate-700/60 font-mono-num text-[11px] font-bold ${
+              hud.ammo === 0 ? 'text-rose-400' : hud.ammo <= 5 ? 'text-amber-400' : 'text-white'
             }`}
           >
-            {hud.isReloading
-              ? `${Math.round(hud.reloadProgress * 100)}%`
-              : hud.ammo === 0
-                ? 'Reload!'
-                : 'Reload'}
+            {hud.ammo}/{hud.maxAmmo}
+          </div>
+          <button
+            type="button"
+            aria-label="Reload"
+            onClick={() => controllerRef.current?.reload()}
+            disabled={hud.isReloading || hud.ammo === hud.maxAmmo}
+            className={`w-10 h-10 rounded-full flex items-center justify-center text-[10px] font-bold border transition-colors ${
+              hud.isReloading
+                ? 'bg-amber-500/30 text-amber-200 border-amber-400/60'
+                : hud.ammo === 0
+                  ? 'bg-rose-600/90 text-white border-rose-300/60 animate-pulse'
+                  : hud.ammo < hud.maxAmmo
+                    ? 'bg-cyan-600/80 text-white border-cyan-300/50'
+                    : 'bg-[#0C121B]/60 text-slate-500 border-slate-700/50'
+            }`}
+          >
+            {hud.isReloading ? `${Math.round(hud.reloadProgress * 100)}` : <RotateCw className="w-4 h-4" />}
           </button>
         </aside>
       )}
@@ -329,7 +300,7 @@ export default function App() {
       {phase === 'playing' && (
         <div className="pointer-events-none absolute bottom-3 inset-x-3 sm:inset-x-5 z-20 flex flex-col sm:flex-row items-start sm:items-end justify-between gap-3">
           {/* Bottom-Left: Real Hand Gesture & Aim Status */}
-          <div className="pointer-events-auto bg-[#0C121B]/85 border border-slate-700/70 rounded-xl px-3.5 py-2.5 text-xs max-w-xs w-full sm:w-auto">
+          <div className="pointer-events-none bg-[#0C121B]/60 border border-slate-700/50 rounded-lg px-2.5 py-1.5 text-[11px] max-w-[11.5rem] sm:max-w-xs w-auto">
             <div className="flex items-center justify-between gap-4">
               <span className="flex items-center gap-1.5 font-medium text-slate-200">
                 <Hand className="w-3.5 h-3.5 text-cyan-400" />
@@ -357,7 +328,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-400">
+            <div className="mt-1.5 hidden sm:flex items-center gap-2 text-[11px] text-slate-400">
               <span>{hud.cameraActive ? 'Camera AR' : 'Training Range'}</span>
               <span aria-hidden="true">·</span>
               <span>
@@ -377,7 +348,7 @@ export default function App() {
               onClick={() => setShowSimControls((s) => !s)}
               className="px-3 py-1.5 text-xs font-medium bg-[#0C121B]/85 hover:bg-slate-800 border border-slate-700/70 rounded-lg text-slate-300 transition-colors"
             >
-              {showSimControls ? 'Hide Test Controls' : 'Desktop / Test Controls'}
+              {showSimControls ? 'Hide' : 'Test'}
             </button>
 
             {showSimControls && (
